@@ -1,0 +1,35 @@
+name = "flashdrop"
+main = "src/index.js"
+compatibility_date = "2025-08-01"
+
+# 静态资源（前端页面），由 Cloudflare 直接托管
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# R2 桶：云端中转的临时文件存储
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "flashdrop-files"
+
+# D1 数据库：传输元数据
+[[d1_databases]]
+binding = "DB"
+database_name = "flashdrop"
+database_id = "REPLACE_WITH_D1_UUID"
+
+# Durable Object：P2P WebRTC 信令房间
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "SignalRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalRoom"]
+
+# 每小时清理过期文件 / 过期会话
+[triggers]
+crons = ["0 * * * *"]
+
+[observability]
+enabled = true

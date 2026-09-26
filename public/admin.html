@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex" />
+  <title>管理后台 · 闪传 FlashDrop</title>
+  <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%235e5ce6'/><text x='50' y='70' font-size='56' text-anchor='middle' fill='white'>⚡</text></svg>" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="bg"><div class="blob blob-1"></div><div class="blob blob-2"></div><div class="blob blob-3"></div></div>
+
+  <!-- 登录 -->
+  <div id="login-view" class="login-wrap">
+    <form class="glass card login-card" id="login-form">
+      <div class="brand login-brand">
+        <span class="brand-badge">⚡</span><span class="brand-name">闪传</span><span class="brand-sub">管理后台</span>
+      </div>
+      <label class="field"><span>管理令牌（ADMIN_TOKEN）</span>
+        <input type="password" id="admin-token" placeholder="输入 ADMIN_TOKEN" autocomplete="current-password" required />
+      </label>
+      <div class="form-error hidden" id="login-error"></div>
+      <button class="btn primary block" type="submit">登 录</button>
+      <div class="muted small">令牌仅保存在本机浏览器，以 Bearer 方式调用 /api/v1/admin/* 接口</div>
+    </form>
+  </div>
+
+  <!-- 主体 -->
+  <div id="admin-view" class="hidden">
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="brand" href="/">
+          <span class="brand-badge">⚡</span><span class="brand-name">闪传</span><span class="brand-sub">管理后台</span>
+        </a>
+        <nav class="nav-links">
+          <a href="/">返回传输</a>
+          <a href="#" id="btn-logout">退出</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="admin-shell">
+      <aside class="glass side">
+        <button class="side-item active" data-page="overview" type="button">📊 概览</button>
+        <button class="side-item" data-page="transfers" type="button">🗂️ 传输记录</button>
+        <button class="side-item" data-page="p2p" type="button">🔗 P2P 会话</button>
+        <button class="side-item" data-page="keys" type="button">🔑 API 密钥</button>
+        <button class="side-item" data-page="settings" type="button">⚙️ 系统设置</button>
+        <button class="side-item" data-page="docs" type="button">📘 API 文档</button>
+      </aside>
+
+      <main class="admin-main">
+        <!-- 概览 -->
+        <section id="page-overview" class="admin-page">
+          <div class="toolbar"><h2 class="page-title" style="margin-bottom:0">概览</h2><div class="spacer"></div>
+            <button class="btn small ghost" id="btn-refresh" type="button">刷新</button>
+            <button class="btn small danger-ghost" id="btn-purge" type="button">立即清理过期文件</button>
+          </div>
+          <div class="stat-grid">
+            <div class="glass stat"><div class="st-label">待接收文件</div><div class="st-value" id="st-ready">—</div><div class="st-sub" id="st-ready-sub"></div></div>
+            <div class="glass stat"><div class="st-label">占用存储</div><div class="st-value" id="st-storage">—</div><div class="st-sub">R2 中临时文件体积</div></div>
+            <div class="glass stat"><div class="st-label">今日新增</div><div class="st-value" id="st-today">—</div><div class="st-sub">中转传输任务</div></div>
+            <div class="glass stat"><div class="st-label">累计完成</div><div class="st-value" id="st-completed">—</div><div class="st-sub" id="st-completed-sub"></div></div>
+          </div>
+          <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)">
+            <div class="glass stat"><div class="st-label">累计送达</div><div class="st-value" id="st-delivered">—</div></div>
+            <div class="glass stat"><div class="st-label">已过期 / 撤销</div><div class="st-value" id="st-gone">—</div></div>
+            <div class="glass stat"><div class="st-label">近 7 天 P2P</div><div class="st-value" id="st-p2p">—</div></div>
+            <div class="glass stat"><div class="st-label">历史任务总数</div><div class="st-value" id="st-total">—</div></div>
+          </div>
+          <div class="glass card" style="padding:18px">
+            <h3 style="font-size:15px;margin-bottom:10px">最近任务</h3>
+            <div class="table-wrap"><table>
+              <thead><tr><th>文件</th><th>大小</th><th>状态</th><th>创建时间</th></tr></thead>
+              <tbody id="recent-body"></tbody>
+            </table></div>
+          </div>
+        </section>
+
+        <!-- 传输记录 -->
+        <section id="page-transfers" class="admin-page hidden">
+          <h2 class="page-title">传输记录</h2>
+          <div class="toolbar">
+            <select id="f-status">
+              <option value="all">全部状态</option>
+              <option value="pending">上传中</option>
+              <option value="ready">待接收</option>
+              <option value="downloading">传输中</option>
+              <option value="completed">已完成</option>
+              <option value="expired">已过期</option>
+              <option value="canceled">已撤销</option>
+            </select>
+            <input type="text" id="f-q" placeholder="搜索文件名 / 取件码" />
+            <button class="btn small primary" id="btn-filter" type="button">查询</button>
+            <div class="spacer"></div>
+            <span class="muted small" id="t-count" style="margin:0"></span>
+          </div>
+          <div class="glass card table-wrap" style="padding:6px">
+            <table>
+              <thead><tr>
+                <th>文件</th><th>取件码</th><th>状态</th><th>接收</th><th>到期</th><th>来源 IP</th><th>操作</th>
+              </tr></thead>
+              <tbody id="transfers-body"></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button class="btn small ghost" id="t-prev" type="button">上一页</button>
+            <span id="t-page"></span>
+            <button class="btn small ghost" id="t-next" type="button">下一页</button>
+          </div>
+        </section>
+
+        <!-- P2P 会话 -->
+        <section id="page-p2p" class="admin-page hidden">
+          <h2 class="page-title">P2P 会话</h2>
+          <p class="muted small" style="text-align:left;margin:0 0 14px">P2P 直传的文件不经过服务器，此处仅记录配对与完成情况。</p>
+          <div class="glass card table-wrap" style="padding:6px">
+            <table>
+              <thead><tr><th>配对码</th><th>文件</th><th>状态</th><th>创建时间</th><th>连接时间</th><th>完成时间</th></tr></thead>
+              <tbody id="p2p-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- API 密钥 -->
+        <section id="page-keys" class="admin-page hidden">
+          <h2 class="page-title">API 密钥</h2>
+          <p class="muted small" style="text-align:left;margin:0 0 14px">为 Android 应用 / 第三方程序签发密钥，调用 API 时携带 <code>X-Api-Key</code> 请求头。开启「API 强制密钥」后，未携带密钥的调用将被拒绝。</p>
+          <div class="glass card" style="padding:18px;margin-bottom:16px">
+            <div class="toolbar" style="margin:0">
+              <input type="text" id="key-name" placeholder="应用名称，如：安卓客户端" style="width:240px" />
+              <button class="btn small primary" id="btn-create-key" type="button">生成密钥</button>
+            </div>
+          </div>
+          <div class="glass card table-wrap" style="padding:6px">
+            <table>
+              <thead><tr><th>密钥</th><th>名称</th><th>调用次数</th><th>最近使用</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="keys-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 设置 -->
+        <section id="page-settings" class="admin-page hidden">
+          <h2 class="page-title">系统设置</h2>
+          <div class="glass card" style="padding:22px;max-width:520px">
+            <label class="field"><span>云端文件默认保留时长（小时，1–168）</span><input type="number" id="s-ttl" min="1" max="168" /></label>
+            <label class="field"><span>单文件大小上限（MB）</span><input type="number" id="s-maxmb" min="1" /></label>
+            <label class="field"><span>默认允许接收次数（1 = 一次性）</span><input type="number" id="s-maxdl" min="1" max="10" /></label>
+            <label class="field"><span>分块上传块大小（MB，≥5）</span><input type="number" id="s-chunk" min="5" max="64" /></label>
+            <label class="field"><span>P2P 配对码有效期（分钟）</span><input type="number" id="s-p2pttl" min="5" max="240" /></label>
+            <label class="field" style="display:flex;align-items:center;gap:10px">
+              <input type="checkbox" id="s-reqkey" style="width:18px;height:18px" />
+              <span style="margin:0">API 创建传输强制要求 X-Api-Key（为正式开放移动端时启用）</span>
+            </label>
+            <div class="btn-row" style="justify-content:flex-start"><button class="btn primary" id="btn-save-settings" type="button">保存设置</button></div>
+          </div>
+        </section>
+
+        <!-- API 文档 -->
+        <section id="page-docs" class="admin-page hidden docs">
+          <h2 class="page-title">API 文档（v1 · 为 Android 预留）</h2>
+          <p>所有接口以 <code>/api/v1</code> 为前缀，返回 JSON；错误格式为 <code>{"error":{"code","message"}}</code>。支持 CORS，原生 App 不受影响。完整文档见仓库 <code>docs/API.md</code>。</p>
+
+          <h3>认证</h3>
+          <ul>
+            <li>管理接口：<code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code></li>
+            <li>开放接口：可选 <code>X-Api-Key</code>（本页「API 密钥」签发）</li>
+          </ul>
+
+          <h3>1. 创建中转任务</h3>
+          <div class="codeblock">POST /api/v1/transfers
+Content-Type: application/json
+X-Api-Key: fdk_xxx            （可选）
+
+{"fileName":"demo.mp4","fileSize":1048576,"mimeType":"video/mp4",
+ "ttlHours":24,"maxDownloads":1}
+
+→ 201 {"id":"…","claimCode":"7KQ2M9","senderToken":"…",
+       "expiresAt":1750000000000,"chunkSize":8388608,
+       "uploadUrl":"/api/v1/transfers/{id}/file?st=…",
+       "partUrl":"/api/v1/transfers/{id}/parts/{n}?st=…",
+       "completeUrl":"/api/v1/transfers/{id}/complete?st=…"}</div>
+
+          <h3>2. 上传文件</h3>
+          <p>≤ chunkSize 用 uploadUrl 单请求直传（PUT，原始二进制 body）；否则按 chunkSize 切块，循环 PUT partUrl（n 从 1 开始），最后 POST completeUrl 并带 <code>{"totalParts":N}</code>。</p>
+          <div class="codeblock">PUT /api/v1/transfers/{id}/file?st=SENDER_TOKEN      （小文件）
+PUT /api/v1/transfers/{id}/parts/1?st=SENDER_TOKEN   （分块 1..N）
+POST /api/v1/transfers/{id}/complete?st=SENDER_TOKEN {"totalParts":3}</div>
+
+          <h3>3. 接收方取件</h3>
+          <div class="codeblock">GET  /api/v1/transfers?code=7KQ2M9          → {kind:"relay"|"p2p", transfer:{…}}
+POST /api/v1/transfers/{id}/accept          {"code":"7KQ2M9"}
+     → {downloadToken, downloadUrl:"/api/v1/transfers/{id}/download?t=…", fileName, fileSize}
+GET  /api/v1/transfers/{id}/download?t=…    （文件流；流结束后云端副本自动删除）</div>
+
+          <h3>4. 发送方管理</h3>
+          <div class="codeblock">GET    /api/v1/transfers/{id}/status?st=SENDER_TOKEN
+DELETE /api/v1/transfers/{id}?st=SENDER_TOKEN   （撤销并立即删除）</div>
+
+          <h3>5. P2P 信令（WebSocket）</h3>
+          <p>先 <code>POST /api/v1/p2p/rooms</code> 取得 6 位配对码，再连接 <code>GET /api/v1/signal?room=CODE&amp;role=sender|receiver</code>。信令只转发 JSON 文本，文件走 WebRTC DataChannel：</p>
+          <div class="codeblock">服务端 → 客户端：{"type":"peer-joined"} | {"type":"sdp","data":{…}} | {"type":"ice","data":{…}}
+              | {"type":"peer-left"} | {"type":"pong"}
+客户端 → 服务端：{"type":"sdp","data":{…}} | {"type":"ice","data":{…}}
+              | {"type":"meta","fileName":…,"fileSize":…,"mime":…}    （DataChannel 打开后由发送端同时发出）
+              | {"type":"transfer-done"} | {"type":"ping"}</div>
+          <p>DataChannel 建议二进制分块 64KB、bufferedAmount 超过 4MB 时等待 bufferedamountlow 再继续；接收完成以文本消息 <code>{"type":"file-end"}</code> 收尾。</p>
+
+          <h3>6. 管理接口</h3>
+          <div class="codeblock">GET    /api/v1/admin/overview
+GET    /api/v1/admin/transfers?page=1&amp;size=20&amp;status=ready&amp;q=
+DELETE /api/v1/admin/transfers/{id}
+GET    /api/v1/admin/p2p
+POST   /api/v1/admin/purge
+GET    /api/v1/admin/api-keys      POST /api/v1/admin/api-keys {"name":"安卓客户端"}
+DELETE /api/v1/admin/api-keys/{key}
+GET    /api/v1/admin/settings      PUT  /api/v1/admin/settings {…}</div>
+
+          <h3>7. Android 接入示例（OkHttp）</h3>
+          <div class="codeblock">// 创建任务
+val body = """{"fileName":"$name","fileSize":$size,"mimeType":"$mime"}"""
+val res = client.newCall(Request.Builder()
+    .url("$BASE/api/v1/transfers")
+    .header("X-Api-Key", apiKey)
+    .post(body.toRequestBody("application/json".toMediaType()))
+    .build()).execute()
+
+// 分块上传（&gt;8MB）
+file.inputStream().use { ins -&gt;
+  repeat(parts) { i -&gt;
+    val chunk = readChunk(ins, chunkSize)
+    client.newCall(Request.Builder()
+      .url("$BASE" + partUrl.replace("{n}", "${i + 1}"))
+      .put(chunk.toRequestBody())
+      .build()).execute()
+  }
+}</div>
+          <p class="muted small" style="text-align:left">提示：P2P 模式在 Android 端可直接使用 <code>org.webrtc</code>（Google 官方 SDK）按上述信令协议实现；中转模式使用 OkHttp 流式下载即可，边下边写盘避免占用内存。</p>
+
+          <h3>8. 端到端加密（AES-256-GCM）</h3>
+          <p>创建任务时传 <code>"encrypted": true</code>：客户端先用随机 256 位密钥在本地加密，再上传密文。密钥仅存在于分享链接的 <code>#k=</code> 片段或「取件码-密钥」完整取件码中，<b>永远不会发送到服务器</b>；查询接口只返回 <code>encrypted: true</code> 标记。</p>
+          <div class="codeblock">密文容器格式 FDENC1：
+"FDENC1"                                ← 6 字节魔数
+[4字节LE帧长][12字节IV][密文帧(含16字节GCM标签)] × N   （帧长=密文字节数，不含IV）
+帧 0   = 元数据 JSON {"n":文件名,"m":MIME,"s":大小}
+帧 1..N = 4MB 内容分块；AAD = 帧序号（uint32 小端）
+密钥   = AES-256-GCM 原始密钥，base64url 编码（43 字符）</div>
+          <p>Android 解密示例：<code>Cipher.getInstance("AES/GCM/NoPadding")</code> + <code>GCMParameterSpec(128, iv)</code>，doFinal 前调用 <code>updateAAD(帧序号4字节小端)</code>。接收流程不变：accept → download（得到密文流）→ 本地解析 FDENC1 逐帧解密。加密任务的 <code>fileName</code> 对服务器显示为占位符 <code>encrypted.fdenc</code>。</p>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toast-root"></div>
+  <div id="modal-root"></div>
+  <script src="/js/admin.js"></script>
+</body>
+</html>
