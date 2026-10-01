@@ -3,3 +3,11 @@ node_modules/
 .dev.vars
 .admin-token.txt
 dist/
+.admin-credentials.txt
+*.apk
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml

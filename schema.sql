@@ -30,19 +30,9 @@ CREATE INDEX IF NOT EXISTS idx_transfers_expires  ON transfers(expires_at);
 CREATE INDEX IF NOT EXISTS idx_transfers_code     ON transfers(claim_code);
 CREATE INDEX IF NOT EXISTS idx_transfers_created  ON transfers(created_at);
 
--- P2P 实时互传会话（仅记录元信息，文件不经过服务器）
-CREATE TABLE IF NOT EXISTS p2p_sessions (
-  id            TEXT PRIMARY KEY,
-  code          TEXT NOT NULL,                 -- 6 位配对码
-  status        TEXT NOT NULL DEFAULT 'active',-- active/completed/expired
-  file_name     TEXT DEFAULT '',
-  file_size     INTEGER DEFAULT 0,
-  created_at    INTEGER NOT NULL,
-  connected_at  INTEGER,
-  completed_at  INTEGER
-);
-CREATE INDEX IF NOT EXISTS idx_p2p_code     ON p2p_sessions(code);
-CREATE INDEX IF NOT EXISTS idx_p2p_status   ON p2p_sessions(status);
+-- 注：P2P 实时互传功能已移除（2026-09-30），p2p_sessions 表不再创建。
+-- 老库中若仍存在该表及其历史数据，不影响运行；如需清理可手动执行：
+--   DROP TABLE IF EXISTS p2p_sessions;
 
 -- 移动端 / 第三方 API 密钥（为 Android 应用预留）
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -52,6 +42,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
   last_used_at  INTEGER,
   requests      INTEGER NOT NULL DEFAULT 0,
   revoked       INTEGER NOT NULL DEFAULT 0
+);
+
+-- 管理登录失败计数（限流）
+CREATE TABLE IF NOT EXISTS login_attempts (
+  ip           TEXT PRIMARY KEY,
+  count        INTEGER NOT NULL DEFAULT 0,
+  window_start INTEGER NOT NULL
 );
 
 -- 系统设置（key-value）
@@ -64,5 +61,4 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
   ('max_file_mb', '2048'),            -- 单文件大小上限 (MB)
   ('default_max_downloads', '1'),     -- 默认允许接收次数（1 = 一次性）
   ('api_require_key', '0'),           -- API 创建传输是否强制要求 X-Api-Key
-  ('chunk_size_mb', '8'),             -- 分块上传块大小 (MB)
-  ('p2p_room_ttl_minutes', '30');     -- P2P 配对码有效期（分钟）
+  ('chunk_size_mb', '8');             -- 分块上传块大小 (MB)

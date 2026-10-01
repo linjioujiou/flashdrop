@@ -1,14 +1,11 @@
 // 闪传 FlashDrop — Cloudflare Worker 主入口
-// 路由：静态页面 / API v1（中转传输 + P2P 信令 + 管理后台）
-import { SignalRoom } from './do/signal-room.js';
+// 路由：静态页面 / API v1（云端中转传输 + 管理后台）
 import {
   json, err, CORS_HEADERS, readJson, randomHex, randomCode, randomId,
-  isAdmin, getSettings, checkApiKey, clamp, maskIp, contentDisposition, DEFAULT_SETTINGS
+  isAdmin, isPasswordOk, makeSession, getSettings, checkApiKey, clamp, maskIp, contentDisposition, DEFAULT_SETTINGS
 } from './util.js';
 
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
-
-export { SignalRoom };
 
 export default {
   async fetch(request, env, ctx) {
@@ -54,12 +51,13 @@ async function handleApi(request, env, ctx, url) {
 
   if (a === 'config' && m === 'GET') {
     const s = await getSettings(env.DB);
-    return json({
+    const cfg = {
       maxFileMb: Number(s.max_file_mb) || 2048,
       ttlHours: Number(s.default_ttl_hours) || 24,
       maxDownloads: Number(s.default_max_downloads) || 1,
       chunkSizeMb: Math.max(5, Number(s.chunk_size_mb) || 8)
-    });
+    };
+    return json(cfg);
   }
 
   if (a === 'transfers') {
@@ -86,8 +84,7 @@ async function handleApi(request, env, ctx, url) {
     return err(404, 'not_found', '接口不存在');
   }
 
-  if (a === 'p2p' && b === 'rooms' && m === 'POST') return createP2PRoom(request, env, url);
-  if (a === 'signal' && m === 'GET') return handleSignal(request, env, url);
+  if (a === 'wallpaper' && m === 'GET') return handleWallpaper();
   if (a === 'admin') return handleAdmin(request, env, url, seg.slice(3), m);
 
   return err(404, 'not_found', '接口不存在');
@@ -138,11 +135,14 @@ async function createTransfer(request, env, url) {
   const expiresAt = now + ttlHours * 3600000;
   const chunkSizeMb = Math.max(5, Number(settings.chunk_size_mb) || 8);
 
+  // 预建分片会话：并发分片上传共享同一会话（懒创建会有竞态，导致分片散落多个会话）
+  const mpu = await env.BUCKET.createMultipartUpload(r2Key, { httpMetadata: { contentType: mimeType } });
+
   await env.DB.prepare(
-    `INSERT INTO transfers (id, kind, file_name, file_size, mime_type, r2_key, claim_code, sender_token,
+    `INSERT INTO transfers (id, kind, file_name, file_size, mime_type, r2_key, upload_id, claim_code, sender_token,
       status, encrypted, max_downloads, expires_at, created_at, note, sender_ip, sender_ua)
-     VALUES (?1, 'relay', ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?11, ?12, ?13, ?14)`
-  ).bind(id, fileName, fileSize, mimeType, r2Key, code, senderToken, encrypted, maxDownloads, expiresAt, now,
+     VALUES (?1, 'relay', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10, ?11, ?12, ?13, ?14, ?15)`
+  ).bind(id, fileName, fileSize, mimeType, r2Key, mpu.uploadId, code, senderToken, encrypted, maxDownloads, expiresAt, now,
     String(body.note || '').slice(0, 500) || null,
     request.headers.get('cf-connecting-ip'), (request.headers.get('user-agent') || '').slice(0, 200)).run();
 
@@ -178,8 +178,15 @@ async function uploadSingle(request, env, id) {
   const obj = await env.BUCKET.put(t.r2_key, buf, {
     httpMetadata: { contentType: t.mime_type || 'application/octet-stream' }
   });
-  await env.DB.prepare("UPDATE transfers SET status = 'ready', file_size = ? WHERE id = ?")
-    .bind(obj.size, id).run();
+  // 单请求直传不使用预建的分片会话：中止它避免残留
+  if (t.upload_id) {
+    try { await env.BUCKET.resumeMultipartUpload(t.r2_key, t.upload_id).abort(); } catch {}
+    await env.DB.prepare("UPDATE transfers SET status = 'ready', file_size = ?, upload_id = NULL WHERE id = ?")
+      .bind(obj.size, id).run();
+  } else {
+    await env.DB.prepare("UPDATE transfers SET status = 'ready', file_size = ? WHERE id = ?")
+      .bind(obj.size, id).run();
+  }
   return json({ ok: true, size: obj.size, status: 'ready' });
 }
 
@@ -191,23 +198,17 @@ async function uploadPart(request, env, id, n) {
   if (url.searchParams.get('st') !== t.sender_token) return err(403, 'bad_token', '发送方凭证无效');
   if (t.status !== 'pending') return err(409, 'wrong_state', '该任务已结束上传');
 
-  let uploadId = t.upload_id;
-  if (!uploadId) {
-    const mpu = await env.BUCKET.createMultipartUpload(t.r2_key);
-    uploadId = mpu.uploadId;
-    await env.DB.prepare('UPDATE transfers SET upload_id = ? WHERE id = ?').bind(uploadId, id).run();
-  }
+  // 会话已在 createTransfer 预建，所有并发分片共享同一 upload_id
+  const mpu = env.BUCKET.resumeMultipartUpload(t.r2_key, t.upload_id);
 
   const buf = await request.arrayBuffer();
   if (!buf.byteLength) return err(400, 'empty_part', '分块内容为空');
-  const mpu = env.BUCKET.resumeMultipartUpload(t.r2_key, uploadId);
   const part = await mpu.uploadPart(n, buf);
 
-  let parts = [];
-  try { parts = JSON.parse(t.parts || '[]'); } catch {}
-  parts = parts.filter(p => p.partNumber !== n);
-  parts.push({ partNumber: n, etag: part.etag });
-  await env.DB.prepare('UPDATE transfers SET parts = ? WHERE id = ?').bind(JSON.stringify(parts), id).run();
+  // 原子追加 etag（客户端并发分片上传安全）；重传同块会产生重复项，complete 时按块号去重
+  await env.DB.prepare(
+    "UPDATE transfers SET parts = json_insert(COALESCE(parts, '[]'), '$[#]', json_object('partNumber', ?1, 'etag', ?2)) WHERE id = ?3"
+  ).bind(n, part.etag, id).run();
 
   return json({ ok: true, partNumber: n, etag: part.etag });
 }
@@ -224,13 +225,16 @@ async function completeUpload(request, env, id) {
   let parts = [];
   try { parts = JSON.parse(t.parts || '[]'); } catch {}
   if (!parts.length) return err(400, 'no_parts', '没有已上传的分块');
-  parts.sort((x, y) => x.partNumber - y.partNumber);
-  if (body.totalParts && Number(body.totalParts) !== parts.length) {
-    return err(409, 'parts_mismatch', `分块数量不符：已上传 ${parts.length}/${body.totalParts}`);
+  // 并发上传会追加重复项：按块号去重（后传覆盖先传），再按块号升序交给 R2
+  const byPart = new Map();
+  for (const p of parts) byPart.set(Number(p.partNumber), p);
+  const deduped = [...byPart.entries()].sort((x, y) => x[0] - y[0]).map(e => e[1]);
+  if (body.totalParts && Number(body.totalParts) !== deduped.length) {
+    return err(409, 'parts_mismatch', `分块数量不符：已上传 ${deduped.length}/${body.totalParts}`);
   }
 
   const mpu = env.BUCKET.resumeMultipartUpload(t.r2_key, t.upload_id);
-  const obj = await mpu.complete(parts);
+  const obj = await mpu.complete(deduped);
   await env.DB.prepare("UPDATE transfers SET status = 'ready', file_size = ?, upload_id = NULL, parts = NULL WHERE id = ?")
     .bind(obj.size, id).run();
   return json({ ok: true, size: obj.size, status: 'ready' });
@@ -256,14 +260,6 @@ async function lookupByCode(request, env, url) {
     });
   }
 
-  const s = await getSettings(env.DB);
-  const room = await env.DB.prepare("SELECT * FROM p2p_sessions WHERE code = ? AND status = 'active'").bind(code).first();
-  if (room && room.created_at > Date.now() - (Number(s.p2p_room_ttl_minutes) || 30) * 60000) {
-    return json({
-      kind: 'p2p',
-      transfer: { code, fileName: room.file_name || null, fileSize: room.file_size || null, expiresAt: room.created_at + (Number(s.p2p_room_ttl_minutes) || 30) * 60000 }
-    });
-  }
   return err(404, 'not_found', '取件码不存在或已失效');
 }
 
@@ -289,7 +285,7 @@ async function acceptTransfer(request, env, id) {
   });
 }
 
-// 下载：流式转发 R2 内容，流结束后按接收次数决定是否立即删除云端副本
+// 下载：流式转发 R2 内容；下载结束后立即删除密文（接收即焚）
 async function downloadTransfer(request, env, ctx, id) {
   const url = new URL(request.url);
   const token = url.searchParams.get('t') || '';
@@ -314,14 +310,10 @@ async function downloadTransfer(request, env, ctx, id) {
   const finish = async () => {
     try {
       await obj.body.pipeTo(its.writable);
-      // 流完成 = 接收方完整收到文件
-      if (claimed >= t.max_downloads) {
-        try { await env.BUCKET.delete(t.r2_key); } catch {}
-        await env.DB.prepare("UPDATE transfers SET status = 'completed', completed_at = ?, r2_key = NULL WHERE id = ?")
-          .bind(Date.now(), id).run();
-      } else {
-        await env.DB.prepare("UPDATE transfers SET status = 'ready' WHERE id = ?").bind(id).run();
-      }
+      // 下载结束 = 接收方完整收到密文：立即删除云端副本（接收即焚）
+      await env.BUCKET.delete(t.r2_key);
+      await env.DB.prepare("UPDATE transfers SET status = 'completed', r2_key = NULL, completed_at = ? WHERE id = ?")
+        .bind(Date.now(), id).run();
     } catch {
       // 客户端中断下载：保留文件，等待重试或过期清理
       await env.DB.prepare("UPDATE transfers SET status = 'ready' WHERE id = ?").bind(id).run().catch(() => {});
@@ -336,6 +328,7 @@ async function downloadTransfer(request, env, ctx, id) {
       'content-length': String(obj.size),
       'content-disposition': contentDisposition(t.file_name),
       'cache-control': 'no-store',
+      ...(t.encrypted ? { 'x-encrypted': 'FDENC1; use the transfer key from the share link to decrypt' } : {}),
       ...CORS_HEADERS
     }
   });
@@ -364,54 +357,30 @@ async function cancelTransfer(request, env, id) {
   return json({ ok: true });
 }
 
-/* ---------------- P2P 信令 ---------------- */
+/* ---------------- Bing 每日壁纸 ---------------- */
 
-async function createP2PRoom(request, env, url) {
-  const s = await getSettings(env.DB);
-  const ttlMs = (Number(s.p2p_room_ttl_minutes) || 30) * 60000;
+/* ---------------- Bing 每日壁纸 ---------------- */
 
-  const ak = await checkApiKey(env, request, s);
-  if (!ak.ok) return err(401, 'unauthorized', '需要有效的 X-Api-Key');
-
-  let code = randomCode();
-  for (let i = 0; i < 5; i++) {
-    const dup = await env.DB.prepare("SELECT 1 FROM p2p_sessions WHERE code = ? AND status = 'active'").bind(code).first();
-    if (!dup) break;
-    code = randomCode();
+async function handleWallpaper() {
+  try {
+    const res = await fetch('https://bbab.net/api/bing/', {
+      redirect: 'follow',
+      cf: { cacheTtl: 43200, cacheEverything: true } // API 自身 12h 缓存，边缘直接命中
+    });
+    if (!res.ok || !/^image\//.test(res.headers.get('content-type') || '')) {
+      return err(404, 'wallpaper_unavailable', '壁纸暂不可用');
+    }
+    const final = (res.url || '').replace(/_UHD\.jpg/i, '_1920x1080.jpg');
+    return Response.redirect(final || res.url, 302);
+  } catch {
+    return err(404, 'wallpaper_unavailable', '壁纸暂不可用');
   }
-  await env.DB.prepare("INSERT INTO p2p_sessions (id, code, status, created_at) VALUES (?, ?, 'active', ?)")
-    .bind(randomId(), code, Date.now()).run();
-
-  return json({
-    code,
-    roomUrl: `${url.origin}/?code=${code}`,
-    wsUrl: `/api/v1/signal?room=${code}&role=sender`,
-    expiresAt: Date.now() + ttlMs
-  }, 201);
-}
-
-// WebSocket 升级 → 转发给对应 Durable Object 房间
-async function handleSignal(request, env, url) {
-  if ((request.headers.get('upgrade') || '').toLowerCase() !== 'websocket') {
-    return err(426, 'upgrade_required', '需要 WebSocket 连接');
-  }
-  const code = (url.searchParams.get('room') || '').toUpperCase();
-  const s = await getSettings(env.DB);
-  const room = await env.DB.prepare("SELECT * FROM p2p_sessions WHERE code = ?").bind(code).first();
-  if (!room || room.status !== 'active' || room.created_at < Date.now() - (Number(s.p2p_room_ttl_minutes) || 30) * 60000) {
-    return err(404, 'room_not_found', '配对码不存在或已过期');
-  }
-  const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
-  const u = new URL(request.url);
-  u.pathname = '/ws';
-  return stub.fetch(u.toString(), request);
 }
 
 /* ---------------- 定时清理 ---------------- */
 
 async function purgeExpired(env) {
   const now = Date.now();
-  const s = await getSettings(env.DB);
   let n = 0;
 
   const rows = (await env.DB.prepare(
@@ -425,20 +394,61 @@ async function purgeExpired(env) {
     n++;
   }
 
-  await env.DB.prepare("UPDATE p2p_sessions SET status = 'expired' WHERE status = 'active' AND created_at < ?")
-    .bind(now - (Number(s.p2p_room_ttl_minutes) || 30) * 60000).run();
   // 30 天前的历史记录仅保留统计意义，超期清除
   await env.DB.prepare("DELETE FROM transfers WHERE status IN ('completed','canceled','expired') AND created_at < ?")
     .bind(now - 30 * 86400000).run();
-  await env.DB.prepare('DELETE FROM p2p_sessions WHERE created_at < ?').bind(now - 30 * 86400000).run();
   return n;
+}
+
+/* ---------------- 管理后台登录 ---------------- */
+
+const LOGIN_WINDOW_MS = 10 * 60 * 1000; // 失败计数窗口
+const LOGIN_MAX_FAILS = 5;              // 窗口内最大失败次数
+const SESSION_TTL_MS = 7 * 86400000;    // 会话有效期 7 天
+
+async function adminLogin(request, env) {
+  const ip = request.headers.get('cf-connecting-ip') || 'local';
+  const now = Date.now();
+  const row = await env.DB.prepare('SELECT count, window_start FROM login_attempts WHERE ip = ?').bind(ip).first();
+  if (row && now - row.window_start < LOGIN_WINDOW_MS && row.count >= LOGIN_MAX_FAILS) {
+    return err(429, 'too_many_attempts', '尝试次数过多，请 10 分钟后再试');
+  }
+
+  const body = await readJson(request);
+  if (!isPasswordOk(String(body.password || ''), env)) {
+    if (row && now - row.window_start < LOGIN_WINDOW_MS) {
+      await env.DB.prepare('UPDATE login_attempts SET count = count + 1 WHERE ip = ?').bind(ip).run();
+    } else {
+      await env.DB.prepare(
+        'INSERT INTO login_attempts (ip, count, window_start) VALUES (?1, 1, ?2) ' +
+        'ON CONFLICT(ip) DO UPDATE SET count = 1, window_start = ?2'
+      ).bind(ip, now).run();
+    }
+    return err(401, 'wrong_password', '密码错误');
+  }
+
+  await env.DB.prepare('DELETE FROM login_attempts WHERE ip = ?').bind(ip).run();
+  const session = await makeSession(env.ADMIN_TOKEN, SESSION_TTL_MS);
+  return json({ ok: true }, 200, {
+    'set-cookie': `fd_admin=${session}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`
+  });
+}
+
+function adminLogout() {
+  return json({ ok: true }, 200, {
+    'set-cookie': 'fd_admin=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0'
+  });
 }
 
 /* ---------------- 管理后台 API ---------------- */
 
 async function handleAdmin(request, env, url, rest, m) {
-  if (!isAdmin(request, env)) return err(401, 'unauthorized', '管理令牌无效');
-  const [a, b] = rest;
+  const [a] = rest;
+  // 登录/注销在鉴权门之外（登录自身有失败次数限制）
+  if (a === 'login' && m === 'POST') return adminLogin(request, env);
+  if (a === 'logout' && m === 'POST') return adminLogout();
+  if (!(await isAdmin(request, env))) return err(401, 'unauthorized', '未登录或凭据无效');
+  const b = rest[1];
 
   if (a === 'overview' && m === 'GET') {
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
@@ -452,9 +462,8 @@ async function handleAdmin(request, env, url, rest, m) {
         (SELECT COUNT(*) FROM transfers) AS total_count,
         (SELECT COUNT(*) FROM transfers WHERE status = 'completed') AS completed_count,
         (SELECT COUNT(*) FROM transfers WHERE status = 'expired') AS expired_count,
-        (SELECT COUNT(*) FROM transfers WHERE status = 'canceled') AS canceled_count,
-        (SELECT COUNT(*) FROM p2p_sessions WHERE created_at >= ?2) AS p2p_week_count`
-    ).bind(todayStart.getTime(), Date.now() - 7 * 86400000).first();
+        (SELECT COUNT(*) FROM transfers WHERE status = 'canceled') AS canceled_count`
+    ).bind(todayStart.getTime()).first();
     const recent = (await env.DB.prepare(
       'SELECT id, file_name, file_size, status, created_at, expires_at FROM transfers ORDER BY created_at DESC LIMIT 8'
     ).all()).results;
@@ -488,13 +497,6 @@ async function handleAdmin(request, env, url, rest, m) {
       await env.DB.prepare("UPDATE transfers SET status = 'canceled', r2_key = NULL WHERE id = ?").bind(b).run();
       return json({ ok: true });
     }
-  }
-
-  if (a === 'p2p' && m === 'GET') {
-    const items = (await env.DB.prepare(
-      'SELECT id, code, status, file_name, file_size, created_at, connected_at, completed_at FROM p2p_sessions ORDER BY created_at DESC LIMIT 100'
-    ).all()).results;
-    return json({ items });
   }
 
   if (a === 'purge' && m === 'POST') {

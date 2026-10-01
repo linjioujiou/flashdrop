@@ -45,10 +45,56 @@ export function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
-export function isAdmin(request, env) {
-  if (!env.ADMIN_TOKEN) return false;
+// 常数时间字符串比较（防时序侧信道）
+export function safeEqual(a, b) {
+  const A = String(a);
+  const B = String(b);
+  let diff = A.length === B.length ? 0 : 1;
+  const len = Math.max(A.length, B.length);
+  for (let i = 0; i < len; i++) {
+    diff |= (A.charCodeAt(i) || 0) ^ (B.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+export async function hmac(secret, msg) {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 管理密码校验：优先 ADMIN_PASSWORD，未设置时回退 ADMIN_TOKEN
+export function isPasswordOk(input, env) {
+  const password = env.ADMIN_PASSWORD || env.ADMIN_TOKEN;
+  return !!password && safeEqual(String(input), password);
+}
+
+// 管理会话：exp.HMAC(ADMIN_TOKEN, 'admin.'+exp) —— 无状态、无法伪造、自带过期
+export async function makeSession(secret, ttlMs) {
+  const exp = Date.now() + ttlMs;
+  return `${exp}.${await hmac(secret, 'admin.' + exp)}`;
+}
+
+export async function verifySession(secret, val) {
+  const dot = String(val).lastIndexOf('.');
+  if (dot < 1) return false;
+  const exp = Number(val.slice(0, dot));
+  if (!Number.isFinite(exp) || exp < Date.now()) return false;
+  const expect = await hmac(secret, 'admin.' + exp);
+  return safeEqual(val.slice(dot + 1), expect);
+}
+
+// 管理鉴权：Bearer ADMIN_TOKEN（API/脚本）或 fd_admin 会话 Cookie（网页登录）二选一
+export async function isAdmin(request, env) {
+  const secret = env.ADMIN_TOKEN;
+  if (!secret) return false;
   const m = /^Bearer\s+(.+)$/i.exec(request.headers.get('authorization') || '');
-  return !!m && m[1].trim() === env.ADMIN_TOKEN;
+  if (m && safeEqual(m[1].trim(), secret)) return true;
+  const cookie = /(?:^|;\s*)fd_admin=([^;]+)/.exec(request.headers.get('cookie') || '');
+  if (cookie) return verifySession(secret, cookie[1]);
+  return false;
 }
 
 export const DEFAULT_SETTINGS = {
@@ -56,8 +102,7 @@ export const DEFAULT_SETTINGS = {
   max_file_mb: '2048',
   default_max_downloads: '1',
   api_require_key: '0',
-  chunk_size_mb: '8',
-  p2p_room_ttl_minutes: '30'
+  chunk_size_mb: '8'
 };
 
 export async function getSettings(db) {

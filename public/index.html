@@ -4,19 +4,38 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>闪传 FlashDrop · 极速文件传输</title>
-  <meta name="description" content="设备间点对点文件直传，或经 Cloudflare R2 云端中转，接收完成后自动删除。无需登录，全平台可用。" />
+  <meta name="description" content="经 Cloudflare R2 云端中转的文件传输，接收完成后自动删除。无需登录，全平台可用。" />
   <meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%230a84ff'/><text x='50' y='70' font-size='56' text-anchor='middle' fill='white'>⚡</text></svg>" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%230a84ff'/%3E%3Cstop offset='1' stop-color='%235e5ce6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='100' height='100' rx='24' fill='url(%23g)'/%3E%3Cpath d='M56 14 L29 56 h18 l-5 30 29-44 h-18 z' fill='white'/%3E%3C/svg%3E" />
   <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
+  <!-- SF Symbols 风格图标精灵表（24px 网格 / 2px 圆头描边 / currentColor） -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="i-zap" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></symbol>
+    <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></symbol>
+    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><line x1="16.5" y1="9.4" x2="7.5" y2="4.21"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
+  </svg>
+
   <div class="bg"><div class="blob blob-1"></div><div class="blob blob-2"></div><div class="blob blob-3"></div></div>
 
   <header class="nav">
     <div class="nav-inner">
       <a class="brand" href="/">
-        <span class="brand-badge">⚡</span><span class="brand-name">闪传</span><span class="brand-sub">FlashDrop</span>
+        <span class="brand-badge"><svg class="icon filled" aria-hidden="true"><use href="#i-zap"/></svg></span><span class="brand-name">闪传</span><span class="brand-sub">FlashDrop</span>
       </a>
       <nav class="nav-links">
         <a href="/" class="active">传输</a>
@@ -28,11 +47,12 @@
   <main class="main">
     <section class="hero">
       <h1>文件传输，<span class="grad-text">快如闪电</span></h1>
-      <p>无需登录、全平台可用。设备同时在线时 P2P 实时直传，或经云端中转——文件在浏览器内加密、被接收后自动删除。</p>
+      <p>无需登录、全平台可用。文件经云端中转——在浏览器内加密、被接收后自动删除。</p>
     </section>
 
     <section class="glass card panel">
       <div class="segmented" id="seg-tabs">
+        <span class="seg-thumb" id="seg-thumb" aria-hidden="true"></span>
         <button class="seg active" data-tab="send" type="button">发送文件</button>
         <button class="seg" data-tab="recv" type="button">接收文件</button>
       </div>
@@ -41,7 +61,7 @@
       <div id="view-send">
         <div class="step" id="send-pick">
           <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="选择文件">
-            <div class="dz-icon">📤</div>
+            <div class="dz-icon"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg></div>
             <div class="dz-title">拖拽文件到这里，或点击选择</div>
             <div class="dz-sub">支持任意类型文件 · 单文件上限 <span id="dz-max">2 GB</span></div>
           </div>
@@ -53,19 +73,10 @@
           <button class="link-btn" id="btn-repick" type="button">‹ 重新选择</button>
           <label class="check-row">
             <input type="checkbox" id="opt-e2e" checked />
-            <span class="cr-text"><b>🔒 端到端加密（推荐）</b> — 文件在浏览器内加密后才上传，服务器仅存密文，密钥只存在于分享链接中；接收需通过完整链接或「取件码-密钥」完整取件码。实时直传通道本身已加密，不受此开关影响。</span>
+            <span class="cr-text"><b><svg class="icon cr-icon" aria-hidden="true"><use href="#i-lock"/></svg> 端到端加密（推荐）</b> — 文件在浏览器内加密后才上传，服务器仅存密文，密钥只存在于分享链接中；接收需通过完整链接或「取件码-密钥」完整取件码。</span>
           </label>
-          <div class="option-grid">
-            <button class="option" id="opt-p2p" type="button">
-              <span class="opt-icon">⚡</span>
-              <span class="opt-name">实时直传</span>
-              <span class="opt-desc">双方同时在线，WebRTC 点对点直连，文件不经过服务器</span>
-            </button>
-            <button class="option" id="opt-relay" type="button">
-              <span class="opt-icon">☁️</span>
-              <span class="opt-name">云端中转</span>
-              <span class="opt-desc">对方离线也能收 · 临时保存于 R2，接收完成后自动删除</span>
-            </button>
+          <div class="btn-row">
+            <button class="btn primary" id="opt-relay" type="button">上传并生成取件码</button>
           </div>
         </div>
 
@@ -76,18 +87,8 @@
           <div class="btn-row"><button class="btn ghost" id="btn-send-cancel" type="button">取消</button></div>
         </div>
 
-        <div class="step hidden" id="send-p2p-room">
-          <div class="code-label">把配对码告诉对方（或让对方扫描二维码）</div>
-          <div class="big-code" id="p2p-code">------</div>
-          <div class="qr-box hidden" id="p2p-qr"></div>
-          <div class="waiting" id="p2p-waiting"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp;正在等待对方加入…</div>
-          <div class="progress hidden" id="p2p-send-progress-wrap"><div class="progress-bar" id="p2p-send-bar"></div></div>
-          <div class="progress-meta hidden" id="p2p-send-meta"><span id="p2p-send-status"></span><span id="p2p-send-percent"></span></div>
-          <div class="btn-row"><button class="btn ghost" id="btn-p2p-cancel" type="button">取消</button></div>
-        </div>
-
         <div class="step hidden" id="send-relay-result">
-          <div class="done-icon small ok">✓</div>
+          <div class="done-icon small ok"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg></div>
           <div class="done-title">上传完成，等待对方接收</div>
           <div class="file-chip" id="relay-file-chip" style="margin-top:16px"></div>
           <div class="code-label" id="relay-code-label">取件码（6 位）</div>
@@ -106,12 +107,6 @@
           </div>
         </div>
 
-        <div class="step hidden center" id="send-done">
-          <div class="done-icon ok">✓</div>
-          <div class="done-title">传输完成</div>
-          <div class="muted">文件已送达对方设备</div>
-          <div class="btn-row"><button class="btn primary" id="btn-send-again" type="button">再传一个</button></div>
-        </div>
       </div>
 
       <!-- ================= 接收 ================= -->
@@ -125,14 +120,6 @@
           <div class="muted">支持 6 位取件码或「取件码-密钥」完整取件码；端到端加密文件建议直接打开对方分享的链接。云端文件在被接收后自动删除。</div>
         </div>
 
-        <div class="step hidden" id="recv-connect">
-          <div class="waiting"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp;<span id="recv-connect-text">正在连接对方设备…</span></div>
-          <div class="file-chip hidden" id="recv-file-chip" style="margin-top:18px"></div>
-          <div class="progress hidden" id="recv-progress"><div class="progress-bar" id="recv-bar"></div></div>
-          <div class="progress-meta hidden" id="recv-progress-meta"><span id="recv-status"></span><span id="recv-percent"></span></div>
-          <div class="btn-row"><button class="btn ghost" id="btn-recv-cancel" type="button">取消</button></div>
-        </div>
-
         <div class="step hidden" id="recv-info">
           <div class="file-chip" id="recv-info-chip"></div>
           <div class="muted" id="recv-info-meta"></div>
@@ -142,22 +129,30 @@
           </div>
         </div>
 
+        <div class="step hidden" id="recv-progress-step">
+          <div class="waiting"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp;<span id="recv-progress-text">正在下载…</span></div>
+          <div class="progress hidden" id="recv-progress"><div class="progress-bar" id="recv-bar"></div></div>
+          <div class="progress-meta hidden" id="recv-progress-meta"><span id="recv-status"></span><span id="recv-percent"></span></div>
+          <div class="btn-row"><button class="btn ghost" id="btn-recv-cancel" type="button">取消</button></div>
+        </div>
+
         <div class="step hidden center" id="recv-done">
           <div class="done-icon ok">✓</div>
-          <div class="done-title">已保存到你的设备</div>
+          <div class="done-title">已接收，文件就绪</div>
           <div class="muted" id="recv-done-sub">云端副本已自动删除</div>
+          <div class="muted small">文件暂存于本页内存：请尽快点击下方按钮保存，离开或刷新页面后将无法再次下载</div>
           <div class="btn-row">
-            <button class="btn primary" id="btn-recv-again" type="button">再收一个</button>
-            <button class="btn ghost hidden" id="btn-save-again" type="button">重新保存</button>
+            <button class="btn primary" id="btn-save-again" type="button">下载文件</button>
+            <button class="btn ghost" id="btn-recv-again" type="button">再收一个</button>
           </div>
         </div>
       </div>
     </section>
 
     <section class="features">
-      <div class="glass feature"><div class="f-icon">⚡</div><h3>实时直传</h3><p>WebRTC 端到端直连，速度取决于双方网络，文件全程不落盘。</p></div>
-      <div class="glass feature"><div class="f-icon">☁️</div><h3>云端中转</h3><p>文件临时保存于 Cloudflare R2，接收完成立即删除，过期自动清理。</p></div>
-      <div class="glass feature"><div class="f-icon">🔒</div><h3>端到端加密</h3><p>AES-256-GCM 浏览器内加密，密钥仅存于分享链接，服务器只见到密文。</p></div>
+      <div class="glass feature"><div class="f-icon"><svg class="icon" aria-hidden="true"><use href="#i-package"/></svg></div><h3>取件码分享</h3><p>6 位取件码或分享链接，对方随时来取，无需同时在线。</p></div>
+      <div class="glass feature"><div class="f-icon"><svg class="icon" aria-hidden="true"><use href="#i-cloud"/></svg></div><h3>云端中转</h3><p>文件临时保存于 Cloudflare R2，接收完成立即删除，过期自动清理。</p></div>
+      <div class="glass feature"><div class="f-icon"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg></div><h3>端到端加密</h3><p>AES-256-GCM 浏览器内加密，密钥仅存于分享链接，服务器只见到密文。</p></div>
     </section>
   </main>
 

@@ -12,20 +12,22 @@ binding = "ASSETS"
 binding = "BUCKET"
 bucket_name = "flashdrop-files"
 
-# D1 数据库：传输元数据
+# D1 数据库：传输元数据（复用账号内已有的 blog-d1-demo 库，Free 计划 D1 名额已满）
 [[d1_databases]]
 binding = "DB"
-database_name = "flashdrop"
-database_id = "REPLACE_WITH_D1_UUID"
+database_name = "blog-d1-demo"
+database_id = "1d76157f-89f4-43ad-982f-09bc210a4873"
 
-# Durable Object：P2P WebRTC 信令房间
-[[durable_objects.bindings]]
-name = "ROOMS"
-class_name = "SignalRoom"
-
+# 迁移历史（保留已应用的 tag，不可修改或删除）：
+#   v1 — 曾创建 SignalRoom（P2P 信令 Durable Object）
+#   v2 — 移除 P2P 直连功能，删除该 Durable Object 及其存储
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SignalRoom"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["SignalRoom"]
 
 # 每小时清理过期文件 / 过期会话
 [triggers]

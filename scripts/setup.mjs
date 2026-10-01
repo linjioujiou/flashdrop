@@ -65,6 +65,25 @@ step('设置 ADMIN_TOKEN 管理令牌', () => {
   if (r.code !== 0) throw new Error(r.out);
 });
 
+let adminPassword;
+step('设置 ADMIN_PASSWORD 后台登录密码', () => {
+  const saved = '.admin-credentials.txt';
+  if (fs.existsSync(saved)) {
+    try {
+      const j = JSON.parse(fs.readFileSync(saved, 'utf8'));
+      if (j.password && j.token === adminToken) { adminPassword = j.password; console.log(`\n    复用已保存的密码（${saved}）`); return; }
+    } catch {}
+  }
+  // 可读性较好的随机密码（大小写字母 + 数字，避开易混淆字符）
+  const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const bytes = randomBytes(14);
+  adminPassword = [...bytes].map(b => alphabet[b % alphabet.length]).join('');
+  fs.writeFileSync(saved, JSON.stringify({ token: adminToken, password: adminPassword }, null, 2));
+  console.log(`\n    新密码已保存到 ${saved}，请妥善保管`);
+  const r = run(['wrangler', 'secret', 'put', 'ADMIN_PASSWORD'], { input: adminPassword + '\n' });
+  if (r.code !== 0) throw new Error(r.out);
+});
+
 step('部署到 Cloudflare Workers', () => {
   const r = run(['wrangler', 'deploy']);
   if (r.code !== 0) throw new Error(r.out);
@@ -72,7 +91,8 @@ step('部署到 Cloudflare Workers', () => {
   console.log(`\n\n  ✅ 部署完成${url ? `: ${url[0]}` : ''}`);
   console.log(`     前台:       ${url ? url[0] : ''}/`);
   console.log(`     管理后台:   ${url ? url[0] : ''}/admin`);
-  console.log(`     管理令牌:   ${adminToken}  （见 .admin-token.txt）`);
+  console.log(`     登录密码:   ${adminPassword}  （见 .admin-credentials.txt）`);
+  console.log(`     API 令牌:   ${adminToken}  （见 .admin-token.txt）`);
   console.log('\n  建议（可选）：在 Cloudflare 控制台为 R2 桶 flashdrop-files 配置生命周期规则，');
   console.log('  对前缀 files/ 的对象在 7 天后自动删除，作为应用层自动删除之外的双保险。\n');
 });

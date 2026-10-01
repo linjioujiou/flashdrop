@@ -66,7 +66,7 @@ X-Api-Key: fdk_xxx            ← 可选
   "mimeType": "video/mp4",      ← 加密传输时传 "application/octet-stream"
   "ttlHours": 24,               ← 可选 1–168，默认取系统设置
   "maxDownloads": 1,            ← 可选 1–10
-  "encrypted": true             ← 可选，开启端到端加密（见第 5 节）
+  "encrypted": true             ← 可选，开启端到端加密（见第 4 节）
 }
 ```
 
@@ -124,7 +124,6 @@ GET {BASE}/api/v1/transfers?code=7KQ2M9
 ```
 
 - `kind = "relay"`：云端中转任务，走 3.4 / 3.5
-- `kind = "p2p"`：P2P 配对码，转第 4 节信令流程
 - `status = "pending"`：对方仍在上传
 - 404：不存在；410：已过期 / 已被领取
 
@@ -168,60 +167,15 @@ GET {BASE}/api/v1/config
 → { "maxFileMb": 2048, "ttlHours": 24, "maxDownloads": 1, "chunkSizeMb": 8 }
 ```
 
----
-
-## 4. P2P 实时互传（WebRTC）
-
-P2P 模式文件不经过服务器，服务端只提供配对与信令转发。
-
-### 4.1 创建配对房间
-
-```http
-POST {BASE}/api/v1/p2p/rooms
-→ 201 { "code": "P3XM9K", "roomUrl": "https://…/?code=P3XM9K",
-        "wsUrl": "/api/v1/signal?room=P3XM9K&role=sender", "expiresAt": … }
-```
-
-### 4.2 信令 WebSocket
-
-```
-GET {BASE}/api/v1/signal?room=<配对码>&role=sender|receiver
-```
-
-- 每个角色仅允许一个连接；角色被占用返回 HTTP 409（`room_full`）。
-- 配对码过期（默认 30 分钟）或不存在返回 HTTP 404。
-
-**消息协议**（JSON 文本帧）：
-
-| 方向 | type | 说明 |
-|---|---|---|
-| 服务端 → 发送端 | `peer-joined` | 接收端已接入，可创建 Offer |
-| 双向 | `sdp` | `{type:"sdp", data:<RTCSessionDescriptionJSON>}`，发送端发 Offer、接收端回 Answer |
-| 双向 | `ice` | `{type:"ice", data:<RTCIceCandidateJSON>}` |
-| 服务端 → 双方 | `peer-left` | 对端断开 |
-| 发送端 → 服务端 | `meta` | `{fileName, fileSize, mime}`，转发给对端并记录到管理后台 |
-| 双向 | `transfer-done` | 接收端确认完成（发送端收到后即可结束） |
-| 双向 | `ping` / `pong` | 保活 |
-
-### 4.3 文件分块传输约定（DataChannel）
-
-- `binaryType = "arraybuffer"`，二进制块 **64 KB**；
-- 发送端 `bufferedAmount` 超过 4 MB 时等待 `bufferedamountlow` 事件再继续（背压控制）；
-- 开始前发送 `{type:"meta", fileName, fileSize, mime}`（经 DataChannel，同样转发语义由接收端直接解析）；
-- 结束时发送文本帧 `{"type":"file-end"}`；接收端拼装 Blob 保存后回 `{"type":"transfer-done"}`；
-- ICE 建议：`stun:stun.l.google.com:19302`、`stun:stun.cloudflare.com:3478`。严格对称网络（NAT 对称型）无法直连时，请引导用户改用云端中转模式。
-
-### 4.4 Android 实现
-
-`org.webrtc`（Google 官方 `PeerConnectionFactory`）按上述协议接入即可；信令用 OkHttp WebSocket。
+前端启动时拉取一次，用于显示单文件上限、默认保留时长与分块阈值。改配置无需重新部署前端。
 
 ---
 
-## 5. 端到端加密（可选，AES-256-GCM）
+## 4. 端到端加密（可选，AES-256-GCM）
 
 开启后**服务器只见到密文**：文件名、MIME、内容全部在客户端加密，密钥永不上传。
 
-### 5.1 密钥与分发
+### 4.1 密钥与分发
 
 - 发送端生成随机 AES-256-GCM 密钥（32 字节），base64url 编码为 43 字符字符串；
 - 密钥仅通过带外渠道传递给接收方，两种载体：
@@ -229,7 +183,7 @@ GET {BASE}/api/v1/signal?room=<配对码>&role=sender|receiver
   - 完整取件码：`{claimCode}-{key}`，接收方粘贴后由客户端本地拆分，仅前 6 位提交给服务器；
 - 服务器任何接口都不接受、不存储密钥；lookup 只返回 `encrypted: true` 标记。
 
-### 5.2 密文容器格式（FDENC1）
+### 4.2 密文容器格式（FDENC1）
 
 ```
 "FDENC1"                                   ← 6 字节魔数
@@ -240,7 +194,7 @@ GET {BASE}/api/v1/signal?room=<配对码>&role=sender|receiver
 AAD    = 帧序号（uint32 小端，帧 0 → 0x00000000），防调序/截断
 ```
 
-### 5.3 流程
+### 4.3 流程
 
 1. 发送端：生成密钥 → 组装 FDENC1 密文（`encrypted:true` 创建任务，`fileName` 传占位符 `encrypted.fdenc`，`fileSize` 传密文体积）→ 按正常接口上传密文；
 2. 接收端：lookup 得到 `encrypted: true` → accept → download 得到密文流 → 校验魔数后逐帧解密（`Cipher.getInstance("AES/GCM/NoPadding")` + `GCMParameterSpec(128, iv)` + `updateAAD(帧序号)`）→ 帧 0 解出真实文件名/MIME，帧 1..N 拼接为文件；
@@ -248,14 +202,19 @@ AAD    = 帧序号（uint32 小端，帧 0 → 0x00000000），防调序/截断
 
 ---
 
-## 6. 管理接口（Bearer ADMIN_TOKEN）
+## 5. 管理接口
+
+认证二选一：
+- **网页登录**：`POST /api/v1/admin/login` 校验密码（`ADMIN_PASSWORD`，未设置时为 `ADMIN_TOKEN`），成功后签发 **HttpOnly 会话 Cookie `fd_admin`（7 天）**，后续请求自动携带；连续失败 5 次锁定 10 分钟（按 IP）。
+- **Bearer 令牌**：`Authorization: Bearer <ADMIN_TOKEN>`（脚本 / 第三方集成，无会话）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| POST | `/api/v1/admin/login` | `{ "password": "…" }` → 签发会话 Cookie；429 = 触发限流 |
+| POST | `/api/v1/admin/logout` | 清除会话 Cookie |
 | GET | `/api/v1/admin/overview` | 统计概览 + 最近任务 |
 | GET | `/api/v1/admin/transfers?page=&size=&status=&q=` | 任务列表（分页/筛选/搜索） |
 | DELETE | `/api/v1/admin/transfers/{id}` | 删除文件并撤销任务 |
-| GET | `/api/v1/admin/p2p` | 最近 P2P 会话 |
 | POST | `/api/v1/admin/purge` | 立即清理所有过期任务 |
 | GET / POST | `/api/v1/admin/api-keys` | 密钥列表 / 签发 `{name}` |
 | DELETE | `/api/v1/admin/api-keys/{key}` | 吊销密钥 |
@@ -263,23 +222,22 @@ AAD    = 帧序号（uint32 小端，帧 0 → 0x00000000），防调序/截断
 
 ---
 
-## 7. 错误码速查
+## 6. 错误码速查
 
 | HTTP | code | 场景 |
 |---|---|---|
 | 400 | bad_code / bad_part / no_parts | 参数不合法 |
 | 401 | unauthorized | 缺少/错误 ADMIN_TOKEN 或 X-Api-Key（强制时） |
 | 403 | bad_token / bad_code | 凭证或取件码不匹配 |
-| 404 | not_found / room_not_found | 资源不存在或已过期 |
-| 409 | not_ready / wrong_state / room_full | 状态冲突 |
+| 404 | not_found | 资源不存在或已过期 |
+| 409 | not_ready / wrong_state | 状态冲突 |
 | 410 | expired / gone / already_received / download_limit | 文件不可再接收 |
 | 413 | file_too_large / use_parts | 超大小限制 / 需走分块 |
 
 ---
 
-## 8. 路线图（v2 预留）
+## 7. 路线图（v2 预留）
 
-- TURN 中继兜底（自建 coturn 或 Cloudflare Calls）
 - 端到端加密 Android 参考实现（Kotlin）与桌面客户端
 - 多文件打包、断点续传（下载侧）
 - 推送通知（FCM），接收端离线提醒

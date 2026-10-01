@@ -1,2 +1,8 @@
 # 复制为 .dev.vars 并修改（本地 wrangler dev 使用）
+# 注意：值后面不要写行内注释，部分 .env 解析器不会剥离，会把注释当成值的一部分。
+
+# API/脚本用的管理令牌（Bearer）
 ADMIN_TOKEN=change-me
+
+# 后台网页登录密码（未设置时回退为 ADMIN_TOKEN）
+ADMIN_PASSWORD=change-me

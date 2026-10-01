@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">闪传</string>
+    <string name="tab_send">发送</string>
+    <string name="tab_recv">接收</string>
+    <string name="pick_file">选择文件</string>
+    <string name="start_upload">开始上传（云端中转）</string>
+    <string name="e2e_hint">端到端加密：密钥只在本机与分享链接中</string>
+    <string name="recv_hint">输入取件码，或粘贴完整链接 /「取件码-密钥」完整取件码</string>
+    <string name="recv_action">接收并保存</string>
+    <string name="settings">设置</string>
+    <string name="server_url">服务器地址</string>
+    <string name="api_key">API 密钥（可选）</string>
+    <string name="copy_code">复制完整取件码</string>
+    <string name="share_link">分享链接</string>
+    <string name="saved_to">已保存到系统「下载」目录</string>
+</resources>

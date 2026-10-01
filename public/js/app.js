@@ -1,4 +1,4 @@
-// 闪传 FlashDrop — 前端逻辑（发送：P2P / 云端中转；接收）
+// 闪传 FlashDrop — 前端逻辑（发送：云端中转；接收）
 (() => {
   'use strict';
 
@@ -31,18 +31,20 @@
     return `剩余约 ${Math.max(1, Math.floor(ms / 60000))} 分钟`;
   };
 
-  const fileIcon = (name, mime) => {
+  const iconSvg = (id) => `<svg class="icon" aria-hidden="true"><use href="#i-${id}"></use></svg>`;
+
+  const fileIconId = (name, mime) => {
     const ext = (name.split('.').pop() || '').toLowerCase();
-    if ((mime || '').startsWith('image/')) return '🖼️';
-    if ((mime || '').startsWith('video/')) return '🎬';
-    if ((mime || '').startsWith('audio/')) return '🎵';
-    if (ext === 'pdf') return '📕';
-    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return '🗜️';
-    if (['doc', 'docx', 'pages'].includes(ext)) return '📄';
-    if (['xls', 'xlsx', 'numbers', 'csv'].includes(ext)) return '📊';
-    if (['ppt', 'pptx', 'key'].includes(ext)) return '📽️';
-    if (['apk', 'dmg', 'exe', 'msi', 'ipa'].includes(ext)) return '📦';
-    return '📄';
+    if ((mime || '').startsWith('image/')) return 'image';
+    if ((mime || '').startsWith('video/')) return 'video';
+    if ((mime || '').startsWith('audio/')) return 'music';
+    if (ext === 'pdf') return 'book';
+    if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'archive';
+    if (['doc', 'docx', 'pages', 'txt', 'md'].includes(ext)) return 'file-text';
+    if (['xls', 'xlsx', 'numbers', 'csv'].includes(ext)) return 'chart';
+    if (['ppt', 'pptx', 'key'].includes(ext)) return 'monitor';
+    if (['apk', 'dmg', 'exe', 'msi', 'ipa'].includes(ext)) return 'package';
+    return 'file';
   };
 
   /* ---------- 端到端加密（FDENC1 容器，AES-256-GCM） ----------
@@ -65,55 +67,96 @@
   };
   const u32le = (n) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
   const E2E_MAGIC = new TextEncoder().encode('FDENC1');
-  const E2E_CHUNK = 4 * 1024 * 1024;
+  const E2E_CHUNK = 4 * 1024 * 1024;        // 加密帧内明文块
+  const E2E_PART_TARGET = 12 * 1024 * 1024; // 分片目标大小（保证非末片 ≥5MiB，R2 要求）
 
-  async function e2eEncrypt(file) {
+  /* 流式 E2E 分片构建器：边加密边出片，内存恒定，支持任意大文件。
+     布局：数据帧（AAD=1..N，帧内明文 ≤4MB，末块补零到整块）在前，
+     元数据帧（AAD=0，任意大小）在最后——保证所有非末尾分片等大（R2/本地模拟均要求）。 */
+  async function makeE2EPartBuilder(file, partTarget) {
     const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt']);
     const rawKey = new Uint8Array(await crypto.subtle.exportKey('raw', key));
     const enc = new TextEncoder();
-    const frames = [];
     const metaPlain = enc.encode(JSON.stringify({ n: file.name, m: file.type || 'application/octet-stream', s: file.size }));
     const metaIv = crypto.getRandomValues(new Uint8Array(12));
     const metaCipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: metaIv, additionalData: u32le(0) }, key, metaPlain));
-    frames.push([metaIv, metaCipher]);
-    for (let i = 0, idx = 1; i < file.size; i += E2E_CHUNK, idx++) {
-      const plain = new Uint8Array(await file.slice(i, Math.min(i + E2E_CHUNK, file.size)).arrayBuffer());
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: u32le(idx) }, key, plain));
-      frames.push([iv, cipher]);
-    }
-    let total = E2E_MAGIC.length;
-    for (const [iv, c] of frames) total += 4 + iv.length + c.length;
-    const out = new Uint8Array(total);
-    out.set(E2E_MAGIC, 0);
-    let off = E2E_MAGIC.length;
-    for (const [iv, c] of frames) {
-      new DataView(out.buffer).setUint32(off, c.length, true); off += 4;
-      out.set(iv, off); off += iv.length;
-      out.set(c, off); off += c.length;
-    }
-    return { blob: new Blob([out], { type: 'application/octet-stream' }), keyB64: b64urlEncode(rawKey) };
+    const metaFrame = (() => {
+      const f = new Uint8Array(16 + metaCipher.length);
+      new DataView(f.buffer).setUint32(0, metaCipher.length, true);
+      f.set(metaIv, 4);
+      f.set(metaCipher, 16);
+      return f;
+    })();
+
+    const chunkCount = Math.max(1, Math.ceil(file.size / E2E_CHUNK));
+    const frameSize = E2E_CHUNK + 32;
+    const framesTotal = chunkCount + 1; // 最后一帧 = 元数据
+    const K = Math.max(1, Math.floor(partTarget / frameSize)); // 每片帧数
+    const totalParts = Math.ceil(framesTotal / K);
+    const totalSize = (chunkCount - 1) * frameSize + (file.size - (chunkCount - 1) * E2E_CHUNK + 32) + metaFrame.length;
+
+    const buildPart = async (n) => {
+      const pieces = [];
+      const from = (n - 1) * K;
+      const to = Math.min(n * K, framesTotal);
+      for (let f = from; f < to; f++) {
+        if (f === chunkCount) { pieces.push(metaFrame); break; } // 元数据帧收尾
+        const start = f * E2E_CHUNK;
+        const real = Math.min(E2E_CHUNK, file.size - start);
+        const plain = new Uint8Array(E2E_CHUNK); // 末块补零到整块，保证等大分片
+        plain.set(new Uint8Array(await file.slice(start, start + real).arrayBuffer()));
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: u32le(f + 1) }, key, plain));
+        const frame = new Uint8Array(4 + iv.length + cipher.length);
+        new DataView(frame.buffer).setUint32(0, cipher.length, true);
+        frame.set(iv, 4);
+        frame.set(cipher, 16);
+        pieces.push(frame);
+      }
+      if (n === totalParts) pieces.push(E2E_MAGIC); // 魔数置于容器末尾（属于大小不受限的末分片）
+      let total = 0;
+      for (const p of pieces) total += p.length;
+      const out = new Uint8Array(total);
+      let o = 0;
+      for (const p of pieces) { out.set(p, o); o += p.length; }
+      return new Blob([out], { type: 'application/octet-stream' });
+    };
+
+    return { keyB64: b64urlEncode(rawKey), buildPart, totalParts: totalParts, totalSize: totalSize + E2E_MAGIC.length };
   }
 
   async function e2eDecrypt(blob, keyB64) {
     const buf = new Uint8Array(await blob.arrayBuffer());
-    if (buf.length < E2E_MAGIC.length || !E2E_MAGIC.every((b, i) => buf[i] === b)) throw new Error('bad_container');
+    // 魔数位于容器末尾
+    const bodyEnd = buf.length - E2E_MAGIC.length;
+    if (bodyEnd < 10 || !E2E_MAGIC.every((b, i) => buf[bodyEnd + i] === b)) throw new Error('bad_container');
     const key = await crypto.subtle.importKey('raw', b64urlDecode(keyB64), { name: 'AES-GCM' }, false, ['decrypt']);
     const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    let off = E2E_MAGIC.length, idx = 0, meta = null;
-    const parts = [];
-    while (off + 4 <= buf.length) {
+    let off = 0, pos = 0, meta = null;
+    const dataByIndex = new Map();
+    while (off + 4 <= bodyEnd) {
       const len = dv.getUint32(off, true); off += 4;
-      if (off + 12 + len > buf.length) throw new Error('bad_container');
+      if (off + 12 + len > bodyEnd) throw new Error('bad_container');
       const iv = buf.subarray(off, off + 12); off += 12;
       const cipher = buf.subarray(off, off + len); off += len;
-      const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: u32le(idx) }, key, cipher));
-      if (idx === 0) meta = JSON.parse(new TextDecoder().decode(plain));
-      else parts.push(plain);
-      idx++;
+      const isLast = off === bodyEnd; // body 内最后一帧 = 元数据（AAD 0），其余帧 AAD = 序号+1
+      const aad = u32le(isLast ? 0 : pos + 1);
+      const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, cipher));
+      if (isLast) meta = JSON.parse(new TextDecoder().decode(plain));
+      else dataByIndex.set(pos + 1, plain);
+      pos++;
     }
     if (!meta) throw new Error('bad_container');
-    return { meta, blob: new Blob(parts, { type: meta.m || 'application/octet-stream' }) };
+    // 末块补零：按元数据里的真实大小裁剪；并校验数据帧完整性
+    if (dataByIndex.size !== Math.ceil(meta.s / E2E_CHUNK)) throw new Error('bad_container');
+    const ordered = [];
+    for (let i = 1; i <= dataByIndex.size; i++) {
+      const c = dataByIndex.get(i);
+      if (!c) throw new Error('bad_container');
+      ordered.push(c);
+    }
+    const full = new Blob(ordered, { type: meta.m || 'application/octet-stream' });
+    return { meta, blob: full.slice(0, meta.s) };
   }
 
   function toast(msg, type = '') {
@@ -121,9 +164,24 @@
     const el = document.createElement('div');
     el.className = 'toast ' + type;
     el.textContent = msg;
-    root.appendChild(el);
-    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 2600);
-    setTimeout(() => el.remove(), 3000);
+    root.appendChild(el); // 入场由 @starting-style 驱动
+    setTimeout(() => {
+      el.classList.add('out'); // 与入场同侧退出，且更快
+      setTimeout(() => el.remove(), 300);
+    }, 2600);
+  }
+
+  // 复制成功反馈：按钮文案变形（状态指示），不再叠加 toast
+  async function copyWithFeedback(btn, text) {
+    if (!btn || btn.disabled) return false;
+    if (await copyText(text)) {
+      const orig = btn.textContent;
+      btn.textContent = '已复制 ✓';
+      btn.disabled = true;
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
+      return true;
+    }
+    return false;
   }
 
   async function copyText(text) {
@@ -196,44 +254,135 @@
     tab: 'send',
     file: null,
     relay: null, // 中转任务 {id, claimCode, senderToken, ...}
-    p2pSend: { ws: null, pc: null, dc: null, code: '' },
     recv: {
       code: '', kind: null, info: null, token: null, blob: null,
-      ws: null, pc: null, dc: null, chunks: [], bytes: 0, meta: null, key: ''
+      chunks: [], bytes: 0, meta: null, key: ''
     }
   };
 
   const show = (id) => {
-    document.querySelectorAll('#view-send .step, #view-recv .step').forEach((el) => el.classList.add('hidden'));
     const el = $(id);
-    if (el) el.classList.remove('hidden');
+    if (!el) return;
+    // 只隐藏目标步骤所在视图的步骤：两个视图互不干扰，
+    // 接收流程的 show 不会抹掉发送侧的结果页（反之亦然）
+    const view = el.closest('#view-recv') ? '#view-recv' : '#view-send';
+    document.querySelectorAll(view + ' .step').forEach((s) => s.classList.add('hidden'));
+    el.classList.remove('hidden');
+    replayEnter(el);
   };
 
   const setBar = (barEl, pctEl, ratio, statusEl, status) => {
-    if (barEl) barEl.style.width = Math.min(100, Math.max(0, ratio * 100)).toFixed(1) + '%';
-    if (pctEl) pctEl.textContent = Math.floor(Math.min(100, Math.max(0, ratio * 100))) + '%';
+    const clamped = Math.min(1, Math.max(0, ratio));
+    if (barEl) {
+      barEl.style.transform = 'scaleX(' + clamped.toFixed(4) + ')';
+      const wrap = barEl.closest('.progress');
+      if (wrap) wrap.classList.toggle('playing', clamped > 0.005 && clamped < 0.995); // 传输中才显示扫光
+    }
+    if (pctEl) pctEl.textContent = Math.floor(clamped * 100) + '%';
     if (statusEl && status) statusEl.textContent = status;
   };
 
-  const chipHtml = (name, size, mime) =>
-    `<span class="fc-icon">${fileIcon(name, mime)}</span>
+  const chipHtml = (name, size, mime, iconId) =>
+    `<span class="fc-icon">${iconSvg(iconId || fileIconId(name, mime))}</span>
      <span><span class="fc-name"></span><div class="fc-size">${fmtBytes(size)}</div></span>`;
-  const setChip = (el, name, size, mime) => {
-    if (el) { el.innerHTML = chipHtml(name, size, mime); el.querySelector('.fc-name').textContent = name; }
+  const setChip = (el, name, size, mime, iconId) => {
+    if (el) { el.innerHTML = chipHtml(name, size, mime, iconId); el.querySelector('.fc-name').textContent = name; }
   };
 
-  /* ---------- 标签页切换 ---------- */
+  /* ---------- 入场动画驱动（data-mounted 模式） ----------
+     显示元素后再挂 .entering 类播放级联动画，800ms 后自动摘除；
+     动画因任何原因失效时，元素保持自然可见态，绝不会卡在隐藏。 */
+
+  let enteringTimers = new WeakMap();
+  function replayEnter(el) {
+    if (!el || document.hidden) return; // 后台标签页不播动画，内容直接可见
+    clearTimeout(enteringTimers.get(el));
+    el.classList.remove('entering');
+    void el.offsetWidth; // 强制回流，保证重复显示时动画从头重放
+    el.classList.add('entering');
+    enteringTimers.set(el, setTimeout(() => el.classList.remove('entering'), 800));
+  }
+
+  /* ---------- 标签页切换（滑动指示器跟随所选） ---------- */
+
+  const segWrap = $('#seg-tabs');
+  const segThumb = $('#seg-thumb');
+
+  function moveSegThumb() {
+    const active = segWrap.querySelector('.seg.active');
+    if (!active || !segThumb) return;
+    segThumb.style.width = active.offsetWidth + 'px';
+    segThumb.style.transform = 'translateX(' + active.offsetLeft + 'px)';
+  }
 
   function switchTab(tab) {
     S.tab = tab;
     document.querySelectorAll('#seg-tabs .seg').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
     $('#view-send').classList.toggle('hidden', tab !== 'send');
     $('#view-recv').classList.toggle('hidden', tab !== 'recv');
+    moveSegThumb();
+    // show() 会隐藏两个视图的所有步骤：发送流程推进后切到接收（或反之）时，
+    // 目标视图可能没有任何可见步骤——回退到该视图的初始步骤
+    const view = tab === 'send' ? '#view-send' : '#view-recv';
+    let visibleStep = document.querySelector(view + ' .step:not(.hidden)');
+    if (!visibleStep) {
+      if (tab === 'recv') resetRecv();       // 重置状态并显示取件码输入
+      else show('#send-pick');               // 发送侧回到选择文件
+      visibleStep = document.querySelector(view + ' .step:not(.hidden)');
+    }
+    replayEnter(visibleStep);
   }
 
   document.querySelectorAll('#seg-tabs .seg').forEach((b) => {
     b.addEventListener('click', () => switchTab(b.dataset.tab));
   });
+  window.addEventListener('resize', moveSegThumb);
+
+  /* ---------- 顶部导航：滚动边缘效果 ---------- */
+
+  const navEl = document.querySelector('.nav');
+  window.addEventListener('scroll', () => {
+    navEl.classList.toggle('scrolled', window.scrollY > 8);
+  }, { passive: true });
+
+  /* ---------- 背景：Bing 每日壁纸 ----------
+     经同源 /api/v1/wallpaper 解析（服务端把 UHD 改写为 1080p 并在边缘缓存），
+     避免直接解码 4K 图卡住渲染进程；加载失败静默回退到渐变光斑。 */
+
+  function applyWallpaper(bg, url) {
+    const img = new Image();
+    img.onload = () => {
+      bg.style.setProperty('--wallpaper', `url("${url}")`);
+      bg.classList.add('bg-photo');
+    };
+    img.src = url;
+  }
+
+  (function loadWallpaper() {
+    const bg = document.querySelector('.bg');
+    if (!bg) return;
+    applyWallpaper(bg, '/api/v1/wallpaper');
+  })();
+
+  /* ---------- 特性卡指针微倾斜（营销档位 delight；触屏/降级环境自动关闭） ---------- */
+
+  (function initTilt() {
+    if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    document.querySelectorAll('.feature').forEach((card) => {
+      card.addEventListener('pointermove', (e) => {
+        if (document.hidden) return; // 时间轴冻结时不更新，避免叠积未完成过渡
+        const r = card.getBoundingClientRect();
+        const x = (e.clientX - r.left) / r.width - 0.5;
+        const y = (e.clientY - r.top) / r.height - 0.5;
+        card.style.transform = `perspective(700px) rotateX(${(-y * 5).toFixed(2)}deg) rotateY(${(x * 6).toFixed(2)}deg)`;
+      });
+      card.addEventListener('pointerleave', () => { card.style.transform = ''; });
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) document.querySelectorAll('.feature').forEach((c) => { c.style.transform = ''; });
+    });
+  })();
 
   /* ---------- 发送：选择文件 ---------- */
 
@@ -264,23 +413,31 @@
 
   $('#btn-repick').addEventListener('click', () => { S.file = null; show('#send-pick'); });
   $('#btn-send-cancel').addEventListener('click', () => { S.file = null; show('#send-pick'); });
-  $('#btn-send-again').addEventListener('click', () => { S.file = null; show('#send-pick'); });
 
   /* ---------- 发送：云端中转 ---------- */
 
   $('#opt-relay').addEventListener('click', () => { if (S.file) startRelaySend(S.file, $('#opt-e2e').checked).catch(onFlowError); });
 
+  const UPLOAD_CONCURRENCY = 3; // 并发分片数（HTTP/2 多路复用下显著提升吞吐）
+
   async function startRelaySend(file, encrypt) {
     show('#send-progress');
     setBar($('#send-bar'), $('#send-percent'), 0, $('#send-status'), '准备中…');
 
-    let payload = file;
-    let keyB64 = null;
+    const chunkSize = Math.max(5, (S.chunkSizeMb || 8)) * 1048576;
+    let keyB64 = null, buildPart, totalParts, payloadSize;
+
     if (encrypt) {
-      setBar($('#send-bar'), $('#send-percent'), 0, $('#send-status'), '正在端到端加密…');
-      const r = await e2eEncrypt(file);
-      payload = r.blob;
-      keyB64 = r.keyB64;
+      setBar($('#send-bar'), $('#send-percent'), 0, $('#send-status'), '正在准备加密…');
+      const plan = await makeE2EPartBuilder(file, Math.max(chunkSize, E2E_PART_TARGET));
+      keyB64 = plan.keyB64;
+      buildPart = plan.buildPart;
+      totalParts = plan.totalParts;
+      payloadSize = plan.totalSize;
+    } else {
+      payloadSize = file.size;
+      totalParts = Math.max(1, Math.ceil(payloadSize / chunkSize));
+      buildPart = (n) => file.slice((n - 1) * chunkSize, Math.min(n * chunkSize, payloadSize));
     }
 
     const created = await api('/api/v1/transfers', {
@@ -288,38 +445,44 @@
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         fileName: keyB64 ? 'encrypted.fdenc' : file.name,
-        fileSize: payload.size,
+        fileSize: payloadSize,
         mimeType: 'application/octet-stream',
         encrypted: !!keyB64
       })
     });
     S.relay = { ...created, keyB64 };
 
-    const chunkSize = created.chunkSize || 8 * 1048576;
-    let uploaded = 0;
-    const onPart = (loaded, total) =>
-      setBar($('#send-bar'), $('#send-percent'), (uploaded + loaded) / payload.size, $('#send-status'), '正在上传…');
+    // 并发分片上传：3 路并行，进度按各分片已传字节合计
+    const partLoaded = new Array(totalParts + 1).fill(0);
+    const uploadedSoFar = () => partLoaded.reduce((a, b) => a + b, 0);
+    const render = () => setBar($('#send-bar'), $('#send-percent'), uploadedSoFar() / payloadSize,
+      $('#send-status'), keyB64 ? '加密并上传中…' : '正在上传…');
 
-    if (payload.size > chunkSize) {
-      const totalParts = Math.ceil(payload.size / chunkSize);
-      for (let n = 1; n <= totalParts; n++) {
-        const blob = payload.slice((n - 1) * chunkSize, Math.min(n * chunkSize, payload.size));
+    let nextPart = 1;
+    const worker = async () => {
+      while (nextPart <= totalParts) {
+        const n = nextPart++;
+        const blob = await buildPart(n);
         let lastErr;
         for (let attempt = 0; attempt < 2; attempt++) {
-          try { await xhrSend(created.partUrl.replace('{n}', String(n)), 'PUT', blob, onPart); lastErr = null; break; }
-          catch (e) { lastErr = e; }
+          try {
+            await xhrSend(created.partUrl.replace('{n}', String(n)), 'PUT', blob,
+              (loaded) => { partLoaded[n] = loaded; render(); });
+            lastErr = null;
+            break;
+          } catch (e) { lastErr = e; }
         }
         if (lastErr) throw lastErr;
-        uploaded += blob.size;
-        setBar($('#send-bar'), $('#send-percent'), uploaded / payload.size, $('#send-status'), '正在上传…');
+        partLoaded[n] = blob.size;
+        render();
       }
-      await api(created.completeUrl, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ totalParts })
-      });
-    } else {
-      await xhrSend(created.uploadUrl, 'PUT', payload, onPart);
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, totalParts) }, worker));
+
+    await api(created.completeUrl, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ totalParts })
+    });
 
     showRelayResult(created, file, keyB64);
   }
@@ -340,14 +503,12 @@
     show('#send-relay-result');
   }
 
-  $('#btn-copy-code').addEventListener('click', async () => {
+  $('#btn-copy-code').addEventListener('click', () => {
     if (!S.relay) return;
     const text = S.relay.keyB64 ? `${S.relay.claimCode}-${S.relay.keyB64}` : S.relay.claimCode;
-    if (await copyText(text)) toast(S.relay.keyB64 ? '完整取件码已复制（含密钥）' : '取件码已复制', 'success');
+    copyWithFeedback($('#btn-copy-code'), text);
   });
-  $('#btn-copy-link').addEventListener('click', async () => {
-    if (await copyText($('#relay-link').value)) toast('链接已复制', 'success');
-  });
+  $('#btn-copy-link').addEventListener('click', () => copyWithFeedback($('#btn-copy-link'), $('#relay-link').value));
   $('#btn-relay-again').addEventListener('click', () => { S.relay = null; S.file = null; show('#send-pick'); });
   $('#btn-relay-undo').addEventListener('click', async () => {
     if (!S.relay) return;
@@ -358,140 +519,6 @@
     S.relay = null; S.file = null; show('#send-pick');
   });
 
-  /* ---------- 发送：P2P 实时直传 ---------- */
-
-  const RTC_CFG = {
-    iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }]
-  };
-
-  $('#opt-p2p').addEventListener('click', () => { if (S.file) startP2PSend(S.file).catch(onFlowError); });
-
-  function wsUrl(code, role) {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${location.host}/api/v1/signal?room=${encodeURIComponent(code)}&role=${role}`;
-  }
-
-  async function startP2PSend(file) {
-    const room = await api('/api/v1/p2p/rooms', { method: 'POST' });
-    S.p2pSend = { ws: null, pc: null, dc: null, code: room.code };
-    $('#p2p-code').textContent = room.code;
-    $('#p2p-waiting').classList.remove('hidden');
-    $('#p2p-send-progress-wrap').classList.add('hidden');
-    $('#p2p-send-meta').classList.add('hidden');
-    renderQr($('#p2p-qr'), room.roomUrl || `${location.origin}/?code=${room.code}`);
-    show('#send-p2p-room');
-
-    const ws = new WebSocket(wsUrl(room.code, 'sender'));
-    S.p2pSend.ws = ws;
-    S.p2pSend.finished = false;
-    // 经信令上报文件元信息（管理后台展示；同时也会转发给接收端）
-    ws.onopen = () => {
-      try {
-        ws.send(JSON.stringify({ type: 'meta', fileName: file.name, fileSize: file.size, mime: file.type || 'application/octet-stream' }));
-      } catch {}
-    };
-
-    ws.onmessage = async (ev) => {
-      let m;
-      try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === 'peer-joined') {
-        $('#p2p-waiting').classList.add('hidden');
-        $('#p2p-send-status') && ($('#p2p-send-status').textContent = '已连接，正在建立直连通道…');
-        $('#p2p-send-progress-wrap').classList.remove('hidden');
-        $('#p2p-send-meta').classList.remove('hidden');
-        setBar($('#p2p-send-bar'), $('#p2p-send-percent'), 0, $('#p2p-send-status'), '正在建立直连通道…');
-        await setupSenderPeer(file);
-      } else if (m.type === 'sdp') {
-        try { await S.p2pSend.pc.setRemoteDescription(m.data); } catch (e) { console.error(e); }
-      } else if (m.type === 'ice') {
-        try { await S.p2pSend.pc.addIceCandidate(m.data); } catch {}
-      } else if (m.type === 'transfer-done') {
-        S.p2pSend.finished = true;
-        setBar($('#p2p-send-bar'), $('#p2p-send-percent'), 1, $('#p2p-send-status'), '对方已接收');
-        cleanupP2P();
-        show('#send-done');
-      } else if (m.type === 'peer-left') {
-        if (S.p2pSend.finished) return;
-        toast('对方已断开', 'error');
-        resetSend();
-      }
-    };
-    ws.onerror = () => { toast('信令连接失败', 'error'); resetSend(); };
-  }
-
-  async function setupSenderPeer(file) {
-    const pc = new RTCPeerConnection(RTC_CFG);
-    S.p2pSend.pc = pc;
-    pc.onicecandidate = (e) => {
-      if (e.candidate && S.p2pSend.ws && S.p2pSend.ws.readyState === 1) {
-        S.p2pSend.ws.send(JSON.stringify({ type: 'ice', data: e.candidate.toJSON() }));
-      }
-    };
-    const dc = pc.createDataChannel('file', { ordered: true });
-    S.p2pSend.dc = dc;
-
-    dc.binaryType = 'arraybuffer';
-    dc.bufferedAmountLowThreshold = 512 * 1024;
-    // 接收端通过 DataChannel 回传完成确认
-    dc.onmessage = (ev) => {
-      if (typeof ev.data !== 'string') return;
-      let m;
-      try { m = JSON.parse(ev.data); } catch { return; }
-    if (m.type === 'transfer-done') {
-      S.p2pSend.finished = true;
-      setBar($('#p2p-send-bar'), $('#p2p-send-percent'), 1, $('#p2p-send-status'), '对方已接收');
-      cleanupP2P();
-      show('#send-done');
-    }
-    };
-    dc.onopen = () => {
-      dc.send(JSON.stringify({ type: 'meta', fileName: file.name, fileSize: file.size, mime: file.type || 'application/octet-stream' }));
-      pump(file);
-    };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    S.p2pSend.ws.send(JSON.stringify({ type: 'sdp', data: pc.localDescription.toJSON() }));
-  }
-
-  async function pump(file) {
-    const dc = S.p2pSend.dc;
-    const CHUNK = 64 * 1024;
-    const HIGH = 4 * 1024 * 1024;
-    let offset = 0;
-    let lastTs = performance.now();
-    let lastBytes = 0;
-
-    while (offset < file.size) {
-      if (dc.readyState !== 'open') return;
-      if (dc.bufferedAmount > HIGH) {
-        await new Promise((r) => dc.addEventListener('bufferedamountlow', r, { once: true }));
-        if (dc.readyState !== 'open') return;
-      }
-      const slice = file.slice(offset, Math.min(offset + CHUNK, file.size));
-      const buf = await slice.arrayBuffer();
-      dc.send(buf);
-      offset += buf.byteLength;
-
-      const now = performance.now();
-      if (now - lastTs > 200) {
-        const speed = (offset - lastBytes) / ((now - lastTs) / 1000);
-        lastTs = now; lastBytes = offset;
-        setBar($('#p2p-send-bar'), $('#p2p-send-percent'), offset / file.size,
-          $('#p2p-send-status'), `直传中 · ${fmtBytes(speed)}/s`);
-      }
-    }
-    setBar($('#p2p-send-bar'), $('#p2p-send-percent'), 1, $('#p2p-send-status'), '发送完成，等待对方确认…');
-    dc.send(JSON.stringify({ type: 'file-end' }));
-  }
-
-  $('#btn-p2p-cancel').addEventListener('click', () => { cleanupP2P(); resetSend(); });
-  function cleanupP2P() {
-    try { S.p2pSend.dc && S.p2pSend.dc.close(); } catch {}
-    try { S.p2pSend.pc && S.p2pSend.pc.close(); } catch {}
-    try { S.p2pSend.ws && S.p2pSend.ws.close(); } catch {}
-    S.p2pSend = { ws: null, pc: null, dc: null, code: '', finished: false };
-  }
   function resetSend() { S.file = null; S.relay = null; show('#send-pick'); }
 
   function onFlowError(e) {
@@ -515,11 +542,7 @@
   });
 
   function resetRecv() {
-    const r = S.recv;
-    try { r.ws && r.ws.close(); } catch {}
-    try { r.pc && r.pc.close(); } catch {}
-    try { r.dc && r.dc.close(); } catch {}
-    S.recv = { code: '', kind: null, info: null, token: null, blob: null, ws: null, pc: null, dc: null, chunks: [], bytes: 0, meta: null, key: '', finished: false };
+    S.recv = { code: '', kind: null, info: null, token: null, blob: null, chunks: [], bytes: 0, meta: null, key: '' };
     recvInput.value = '';
     show('#recv-code');
   }
@@ -538,8 +561,7 @@
       S.recv.code = codePart;
       S.recv.kind = res.kind;
       S.recv.key = keyPart || S.recv.key || '';
-      if (res.kind === 'relay') showRelayRecv(res.transfer);
-      else startP2PReceive(codePart);
+      showRelayRecv(res.transfer);
     } finally {
       btn.disabled = false;
     }
@@ -555,9 +577,7 @@
     }
     S.recv.info = t;
     if (t.encrypted) {
-      setChip($('#recv-info-chip'), '端到端加密文件（接收后自动解密）', t.fileSize, '');
-      const icon = $('#recv-info-chip .fc-icon');
-      if (icon) icon.textContent = '🔒';
+      setChip($('#recv-info-chip'), '端到端加密文件（接收后自动解密）', t.fileSize, '', 'lock');
     } else {
       setChip($('#recv-info-chip'), t.fileName, t.fileSize, t.mimeType);
     }
@@ -576,7 +596,9 @@
 
   async function acceptAndDownload() {
     const t = S.recv.info;
-    show('#recv-progress');
+    // 注意：要 show 的是外层 step，不是里面的进度条元素——否则父级会被一起隐藏，
+    // 进度条永远不可见（此前 show('#recv-progress') 就踩了这个坑）
+    show('#recv-progress-step');
     $('#recv-progress').classList.remove('hidden');
     $('#recv-progress-meta').classList.remove('hidden');
     setBar($('#recv-bar'), $('#recv-percent'), 0, $('#recv-status'), '正在获取下载凭证…');
@@ -621,7 +643,7 @@
     }
     S.recv.blob = finalBlob;
     S.recv.meta = { fileName: finalName };
-    saveBlob(finalBlob, finalName);
+    saveBlob(finalBlob, finalName); // 自动保存一次，错过也能随时点下方按钮重存
     const encNote = (S.recv.info && S.recv.info.encrypted)
       ? '已在浏览器内解密 · 云端始终仅存密文且已删除'
       : '云端副本已自动删除';
@@ -630,90 +652,18 @@
     toast('接收完成，云端副本已删除', 'success');
   }
 
-  // P2P 接收
-  function startP2PReceive(code) {
-    show('#recv-connect');
-    $('#recv-connect-text').textContent = '正在连接对方设备…';
-
-    const r = S.recv;
-    const ws = new WebSocket(wsUrl(code, 'receiver'));
-    r.ws = ws;
-
-    ws.onmessage = async (ev) => {
-      let m;
-      try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === 'sdp') {
-        const pc = new RTCPeerConnection(RTC_CFG);
-        r.pc = pc;
-        pc.onicecandidate = (e) => {
-          if (e.candidate && ws.readyState === 1) ws.send(JSON.stringify({ type: 'ice', data: e.candidate.toJSON() }));
-        };
-        pc.ondatachannel = (e) => wireRecvChannel(e.channel);
-        await pc.setRemoteDescription(m.data);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type: 'sdp', data: pc.localDescription.toJSON() }));
-      } else if (m.type === 'ice') {
-        try { await r.pc.addIceCandidate(m.data); } catch {}
-      } else if (m.type === 'peer-left') {
-        if (S.recv.finished) return;
-        toast('对方已断开', 'error');
-        resetRecv();
-      }
-    };
-    ws.onerror = () => { toast('连接失败，请检查配对码', 'error'); resetRecv(); };
-  }
-
-  function wireRecvChannel(dc) {
-    const r = S.recv;
-    r.dc = dc;
-    dc.binaryType = 'arraybuffer';
-    dc.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        let m;
-        try { m = JSON.parse(ev.data); } catch { return; }
-        if (m.type === 'meta') {
-          r.meta = m;
-          setChip($('#recv-file-chip'), m.fileName, m.fileSize, m.mime);
-          $('#recv-file-chip').classList.remove('hidden');
-          $('#recv-connect-text').textContent = '直连已建立，正在接收…';
-          $('#recv-progress').classList.remove('hidden');
-          $('#recv-progress-meta').classList.remove('hidden');
-          setBar($('#recv-bar'), $('#recv-percent'), 0, $('#recv-status'), `接收中 · ${fmtBytes(m.fileSize)}`);
-        } else if (m.type === 'file-end') {
-          finishP2PReceive();
-        }
-      } else {
-        r.chunks.push(ev.data);
-        r.bytes += ev.data.byteLength;
-        if (r.meta && r.meta.fileSize) {
-          setBar($('#recv-bar'), $('#recv-percent'), r.bytes / r.meta.fileSize, $('#recv-status'), `接收中 · ${fmtBytes(r.bytes)}`);
-        }
-      }
-    };
-  }
-
-  function finishP2PReceive() {
-    const r = S.recv;
-    r.finished = true;
-    const blob = new Blob(r.chunks, { type: (r.meta && r.meta.mime) || 'application/octet-stream' });
-    r.blob = blob;
-    setBar($('#recv-bar'), $('#recv-percent'), 1, $('#recv-status'), '接收完成');
-    saveBlob(blob, (r.meta && r.meta.fileName) || 'file');
-    try { r.dc && r.dc.send(JSON.stringify({ type: 'transfer-done' })); } catch {}
-    // 同步告知服务器（记录会话完成 + 经信令通知发送端）
-    try { r.ws && r.ws.readyState === 1 && r.ws.send(JSON.stringify({ type: 'transfer-done' })); } catch {}
-    $('#recv-done-sub').textContent = `${(r.meta && r.meta.fileName) || '文件'} · ${fmtBytes(blob.size)} · P2P 直传，未经过服务器`;
-    show('#recv-done');
-    toast('接收完成', 'success');
-  }
-
   /* ---------- 初始化 ---------- */
 
   (async function init() {
+    moveSegThumb();
+    // 后台/被遮挡的标签页冻结动画时间轴，入场动画会停在透明帧——直接禁用
+    const syncAnimGate = () => document.documentElement.classList.toggle('no-anim', document.hidden);
+    syncAnimGate();
+    document.addEventListener('visibilitychange', syncAnimGate);
     try {
       const cfg = await api('/api/v1/config');
       maxFileMb = cfg.maxFileMb || 2048;
+      S.chunkSizeMb = cfg.chunkSizeMb || 8;
       $('#dz-max').textContent = fmtBytes(maxFileMb * 1048576);
     } catch {}
 

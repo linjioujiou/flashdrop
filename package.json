@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "闪传 FlashDrop — 基于 Cloudflare Workers + R2 的 P2P/云端中转文件传输服务",
+  "description": "闪传 FlashDrop — 基于 Cloudflare Workers + R2 的云端中转文件传输服务",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
